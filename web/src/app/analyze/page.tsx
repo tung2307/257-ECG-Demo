@@ -151,9 +151,10 @@ async function detectCsvSamplingRate(file: File): Promise<number | null> {
      * fs=300
      * fs: 300
      */
-    const metadataMatch = metadata.match(
-      /(?:sampling[\s_-]*rate|sample[\s_-]*rate|sampling[\s_-]*frequency|sample[\s_-]*frequency|fs)\s*[:=,]\s*(\d+(?:\.\d+)?)/i,
-    );
+    const samplingRatePattern =
+      /(?:sampling[\s_-]*rate|sample[\s_-]*rate|sampling[\s_-]*frequency|sample[\s_-]*frequency|fs)\s*[:=,]\s*(\d+(?:\.\d+)?)/i;
+
+    const metadataMatch = samplingRatePattern.exec(metadata);
 
     if (metadataMatch?.[1]) {
       const rate = Number(metadataMatch[1]);
