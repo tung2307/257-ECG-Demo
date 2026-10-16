@@ -2,10 +2,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-import importlib.util
 import json
+import math
 import os
-import sys
 import time
 
 import joblib
@@ -18,10 +17,10 @@ from dotenv import load_dotenv
 
 from fastapi import (
     FastAPI,
-    UploadFile,
     File,
     Form,
     HTTPException,
+    UploadFile,
 )
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,11 +65,13 @@ app = FastAPI(
     version="3.0.0",
 )
 
+
 app.add_middleware(
     CORSMiddleware,
 
     allow_origins=[
         "http://localhost:3000",
+        "https://257-ecg-demo.vercel.app",
     ],
 
     allow_credentials=True,
@@ -114,79 +115,7 @@ CTRHYTHM_PATH = (
 
 
 # =========================================================
-# OFFICIAL CTRHYTHM SOURCE
-# =========================================================
-
-CTRHYTHM_DIR = (
-    Path.home()
-    / "Downloads"
-    / "CMPE257"
-    / "CTRhythm"
-)
-
-CTRHYTHM_SOURCE = (
-    CTRHYTHM_DIR
-    / "model.py"
-)
-
-
-if not CTRHYTHM_SOURCE.exists():
-
-    raise FileNotFoundError(
-        f"CTRhythm model.py not found: {CTRHYTHM_SOURCE}"
-    )
-
-
-# Allows model.py to find any local CTRhythm files
-if str(CTRHYTHM_DIR) not in sys.path:
-
-    sys.path.insert(
-        0,
-        str(CTRHYTHM_DIR),
-    )
-
-
-spec = (
-    importlib.util
-    .spec_from_file_location(
-        "official_ctrhythm_model",
-        CTRHYTHM_SOURCE,
-    )
-)
-
-
-if (
-    spec is None
-    or
-    spec.loader is None
-):
-
-    raise ImportError(
-        f"Could not load CTRhythm model from {CTRHYTHM_SOURCE}"
-    )
-
-
-ctrhythm_module = (
-    importlib.util
-    .module_from_spec(
-        spec
-    )
-)
-
-
-spec.loader.exec_module(
-    ctrhythm_module
-)
-
-
-CTRhythm = (
-    ctrhythm_module
-    .CTRhythm
-)
-
-
-# =========================================================
-# ECG SETTINGS
+# SETTINGS
 # =========================================================
 
 CLASS_NAMES = [
@@ -206,10 +135,542 @@ TARGET_LENGTH = (
 )
 
 
-# CPU is easiest/stable for API inference
-device = torch.device(
+DEVICE = torch.device(
     "cpu"
 )
+
+
+# =========================================================
+# OFFICIAL CTRHYTHM ARCHITECTURE
+# Embedded so Render does not need a local model.py
+# =========================================================
+
+class ConvBlock(nn.Module):
+
+    def __init__(
+        self,
+        channel_in,
+        channel,
+        stride=1,
+    ):
+
+        super().__init__()
+
+        self.conv = nn.Conv1d(
+            channel_in,
+            channel,
+            kernel_size=3,
+            padding=1,
+            stride=stride,
+        )
+
+        self.norm = nn.BatchNorm1d(
+            channel
+        )
+
+        self.activate = nn.ReLU()
+
+
+    def forward(
+        self,
+        x,
+    ):
+
+        x = self.conv(
+            x
+        )
+
+        x = self.norm(
+            x
+        )
+
+        x = self.activate(
+            x
+        )
+
+        return x
+
+
+class CTRhythmResidualBlock(nn.Module):
+
+    def __init__(
+        self,
+        channel_in=32,
+        channel=32,
+        stride=1,
+        dropout=0.3,
+    ):
+
+        super().__init__()
+
+        self.stride = stride
+
+        self.dropout = nn.Dropout(
+            p=dropout,
+            inplace=False,
+        )
+
+
+        self.main = nn.Sequential(
+
+            ConvBlock(
+                channel_in,
+                channel,
+                stride=stride,
+            ),
+
+            ConvBlock(
+                channel,
+                channel,
+            ),
+
+            ConvBlock(
+                channel,
+                channel,
+            ),
+        )
+
+
+        self.skip = None
+
+
+        if self.stride == 2:
+
+            self.skip = nn.Conv1d(
+                channel_in,
+                channel,
+                kernel_size=3,
+                padding=1,
+                stride=stride,
+            )
+
+
+    def forward(
+        self,
+        x,
+    ):
+
+        x = self.dropout(
+            x
+        )
+
+        y = self.main(
+            x
+        )
+
+
+        if self.stride == 2:
+
+            x = self.skip(
+                x
+            )
+
+
+        x = (
+            y
+            +
+            x
+        )
+
+        return x
+
+
+class CNNModule(nn.Module):
+
+    def __init__(
+        self,
+        channel_in=1,
+        downsample_depth=5,
+        main_depth=1,
+        dropout=0.3,
+    ):
+
+        super().__init__()
+
+
+        self.downsample_layers = nn.Sequential(
+
+            CTRhythmResidualBlock(
+                channel_in,
+                16,
+                2,
+                dropout,
+            ),
+
+            CTRhythmResidualBlock(
+                16,
+                32,
+                2,
+                dropout,
+            ),
+        )
+
+
+        self.main = nn.Sequential(
+
+            CTRhythmResidualBlock(
+                dropout=dropout
+            )
+        )
+
+
+        if downsample_depth > 2:
+
+            for _ in range(
+                downsample_depth
+                -
+                2
+            ):
+
+                self.downsample_layers.append(
+
+                    CTRhythmResidualBlock(
+                        32,
+                        32,
+                        2,
+                        dropout=dropout,
+                    )
+                )
+
+
+        if main_depth > 1:
+
+            for _ in range(
+                main_depth
+                -
+                1
+            ):
+
+                self.downsample_layers.append(
+
+                    CTRhythmResidualBlock(
+                        32,
+                        32,
+                        1,
+                        dropout=dropout,
+                    )
+                )
+
+
+    def forward(
+        self,
+        x,
+    ):
+
+        x = self.downsample_layers(
+            x
+        )
+
+        x = self.main(
+            x
+        )
+
+        return x
+
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(
+        self,
+        d_in,
+        d_model,
+        dropout=0.1,
+        max_len=10000,
+    ):
+
+        super().__init__()
+
+        self.dropout = nn.Dropout(
+            p=dropout
+        )
+
+
+        position = (
+            torch.arange(
+                max_len
+            )
+            .unsqueeze(
+                1
+            )
+        )
+
+
+        div_term = torch.exp(
+
+            torch.arange(
+                0,
+                d_model,
+                2,
+            )
+
+            *
+
+            -(
+                math.log(
+                    10000.0
+                )
+                /
+                d_model
+            )
+        )
+
+
+        pe = torch.zeros(
+            max_len,
+            1,
+            d_model,
+        )
+
+
+        pe[
+            :,
+            0,
+            0::2,
+        ] = torch.sin(
+            position
+            *
+            div_term
+        )
+
+
+        pe[
+            :,
+            0,
+            1::2,
+        ] = torch.cos(
+            position
+            *
+            div_term
+        )
+
+
+        self.register_buffer(
+            "pe",
+            pe,
+        )
+
+
+        self.linear = nn.Linear(
+            d_in,
+            d_model,
+        )
+
+
+    def forward(
+        self,
+        x,
+    ):
+
+        x = self.linear(
+            x
+        )
+
+
+        x = (
+            x
+            +
+            self.pe[
+                :x.size(0),
+                :
+            ]
+        )
+
+
+        x = self.dropout(
+            x
+        )
+
+        return x
+
+
+class TransformerEncoder(nn.Module):
+
+    def __init__(
+        self,
+        d_model,
+        nhead,
+        num_layers,
+        dim_feedforward,
+        dropout=0.1,
+    ):
+
+        super().__init__()
+
+
+        encoder_layer = (
+            nn.TransformerEncoderLayer(
+
+                d_model,
+
+                nhead,
+
+                dim_feedforward,
+
+                dropout,
+
+                batch_first=True,
+            )
+        )
+
+
+        self.transformer_encoder = (
+            nn.TransformerEncoder(
+
+                encoder_layer,
+
+                num_layers,
+            )
+        )
+
+
+    def forward(
+        self,
+        x,
+    ):
+
+        x = (
+            self.transformer_encoder(
+                x
+            )
+        )
+
+        return x
+
+
+class CTRhythm(nn.Module):
+
+    def __init__(
+        self,
+        init_channels=1,
+        d_model=32,
+        nhead=8,
+        num_layers=6,
+        dim_feedforward=256,
+        num_classes=4,
+        dropout=0.1,
+    ):
+
+        super().__init__()
+
+
+        self.CNN = (
+            CNNModule(
+
+                channel_in=
+                    init_channels,
+
+                downsample_depth=
+                    5,
+
+                main_depth=
+                    1,
+
+                dropout=
+                    0.3,
+            )
+        )
+
+
+        self.pos_encoding = (
+            PositionalEncoding(
+
+                32,
+
+                d_model,
+
+                dropout,
+            )
+        )
+
+
+        self.transformer_encoder = (
+            TransformerEncoder(
+
+                d_model,
+
+                nhead,
+
+                num_layers,
+
+                dim_feedforward,
+
+                dropout=
+                    dropout,
+            )
+        )
+
+
+        self.classification = (
+            nn.Linear(
+
+                d_model,
+
+                num_classes,
+            )
+        )
+
+
+    def forward_feature(
+        self,
+        x,
+    ):
+
+        x = self.CNN(
+            x
+        )
+
+
+        x = x.permute(
+            2,
+            0,
+            1,
+        )
+
+
+        x = self.pos_encoding(
+            x
+        )
+
+
+        x = x.permute(
+            1,
+            0,
+            2,
+        )
+
+
+        x = (
+            self.transformer_encoder(
+                x
+            )
+        )
+
+
+        x = torch.mean(
+            x,
+            dim=1,
+        )
+
+
+        return x
+
+
+    def forward(
+        self,
+        x,
+    ):
+
+        x = self.forward_feature(
+            x
+        )
+
+
+        x = self.classification(
+            x
+        )
+
+
+        return x
 
 
 # =========================================================
@@ -271,15 +732,15 @@ class ResidualBlock(nn.Module):
         x,
     ):
 
-        identity = (
-            self.shortcut(
-                x
-            )
+        identity = self.shortcut(
+            x
         )
 
 
         x = self.relu(
+
             self.bn1(
+
                 self.conv1(
                     x
                 )
@@ -288,6 +749,7 @@ class ResidualBlock(nn.Module):
 
 
         x = self.bn2(
+
             self.conv2(
                 x
             )
@@ -354,6 +816,7 @@ class ECGCNNTransformer(nn.Module):
 
 
         self.pos_embedding = nn.Parameter(
+
             torch.zeros(
                 1,
                 141,
@@ -380,7 +843,9 @@ class ECGCNNTransformer(nn.Module):
 
         self.transformer = (
             nn.TransformerEncoder(
+
                 encoder_layer,
+
                 num_layers=2,
             )
         )
@@ -449,33 +914,102 @@ class ECGCNNTransformer(nn.Module):
 
 
 # =========================================================
+# CHECKPOINT HELPER
+# =========================================================
+
+def get_state_dict(
+    checkpoint,
+):
+
+    if (
+        isinstance(
+            checkpoint,
+            dict,
+        )
+        and
+        "model_state_dict"
+        in checkpoint
+    ):
+
+        checkpoint = (
+            checkpoint[
+                "model_state_dict"
+            ]
+        )
+
+
+    if not isinstance(
+        checkpoint,
+        dict,
+    ):
+
+        raise ValueError(
+            "Checkpoint does not contain a state_dict."
+        )
+
+
+    if (
+        checkpoint
+        and
+        all(
+            key.startswith(
+                "module."
+            )
+            for key
+            in checkpoint.keys()
+        )
+    ):
+
+        checkpoint = {
+
+            key.removeprefix(
+                "module."
+            ):
+                value
+
+            for (
+                key,
+                value,
+            )
+            in checkpoint.items()
+        }
+
+
+    return checkpoint
+
+
+# =========================================================
 # LOAD MODELS
 # =========================================================
 
 def load_models():
 
-    # -----------------------------------------------------
-    # FILE CHECK
-    # -----------------------------------------------------
+    missing = [
 
-    if not RF_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Random Forest not found: {RF_PATH}"
+        str(
+            path
         )
 
+        for path
+        in [
+            RF_PATH,
+            TRANSFORMER_PATH,
+            CTRHYTHM_PATH,
+        ]
 
-    if not TRANSFORMER_PATH.exists():
+        if not path.exists()
+    ]
+
+
+    if missing:
 
         raise FileNotFoundError(
-            f"CNN Transformer not found: {TRANSFORMER_PATH}"
-        )
 
-
-    if not CTRHYTHM_PATH.exists():
-
-        raise FileNotFoundError(
-            f"CTRhythm checkpoint not found: {CTRHYTHM_PATH}"
+            "Missing model file(s): "
+            +
+            ", ".join(
+                missing
+            )
         )
 
 
@@ -489,7 +1023,7 @@ def load_models():
 
 
     # -----------------------------------------------------
-    # SIMPLIFIED CNN + TRANSFORMER
+    # CNN + TRANSFORMER
     # -----------------------------------------------------
 
     transformer = (
@@ -501,34 +1035,23 @@ def load_models():
 
     transformer_checkpoint = (
         torch.load(
+
             TRANSFORMER_PATH,
-            map_location=device,
-            weights_only=False,
+
+            map_location=
+                DEVICE,
+
+            weights_only=
+                False,
         )
     )
 
 
-    if (
-        isinstance(
-            transformer_checkpoint,
-            dict,
-        )
-        and
-        "model_state_dict"
-        in transformer_checkpoint
-    ):
-
-        transformer_state = (
-            transformer_checkpoint[
-                "model_state_dict"
-            ]
-        )
-
-    else:
-
-        transformer_state = (
+    transformer_state = (
+        get_state_dict(
             transformer_checkpoint
         )
+    )
 
 
     transformer.load_state_dict(
@@ -537,7 +1060,7 @@ def load_models():
 
 
     transformer.to(
-        device
+        DEVICE
     )
 
 
@@ -545,19 +1068,9 @@ def load_models():
 
 
     # -----------------------------------------------------
-    # CTRHYTHM CHECKPOINT
+    # CTRHYTHM
     # -----------------------------------------------------
 
-    ctrhythm_checkpoint = (
-        torch.load(
-            CTRHYTHM_PATH,
-            map_location=device,
-            weights_only=False,
-        )
-    )
-
-
-    # These are the settings used for your training
     ctrhythm = CTRhythm(
 
         init_channels=1,
@@ -576,27 +1089,25 @@ def load_models():
     )
 
 
-    if (
-        isinstance(
-            ctrhythm_checkpoint,
-            dict,
+    ctrhythm_checkpoint = (
+        torch.load(
+
+            CTRHYTHM_PATH,
+
+            map_location=
+                DEVICE,
+
+            weights_only=
+                False,
         )
-        and
-        "model_state_dict"
-        in ctrhythm_checkpoint
-    ):
+    )
 
-        ctrhythm_state = (
-            ctrhythm_checkpoint[
-                "model_state_dict"
-            ]
-        )
 
-    else:
-
-        ctrhythm_state = (
+    ctrhythm_state = (
+        get_state_dict(
             ctrhythm_checkpoint
         )
+    )
 
 
     ctrhythm.load_state_dict(
@@ -605,7 +1116,7 @@ def load_models():
 
 
     ctrhythm.to(
-        device
+        DEVICE
     )
 
 
@@ -643,7 +1154,7 @@ print(
 )
 
 print(
-    f"CTRhythm architecture: {CTRHYTHM_SOURCE}"
+    "CTRhythm architecture: embedded in api/main.py"
 )
 
 print(
@@ -670,7 +1181,7 @@ def read_mat_ecg(
     )
 
 
-    # CINC 2017 format
+    # PhysioNet / CinC 2017
     if "val" in mat:
 
         signal = (
@@ -718,9 +1229,7 @@ def read_mat_ecg(
             continue
 
 
-        signal = (
-            value.squeeze()
-        )
+        signal = value.squeeze()
 
 
         if (
@@ -759,11 +1268,12 @@ def read_csv_ecg(
             )
         )
 
+
     except Exception as error:
 
         raise ValueError(
             f"Could not read CSV: {error}"
-        )
+        ) from error
 
 
     if df.empty:
@@ -774,6 +1284,7 @@ def read_csv_ecg(
 
 
     preferred_names = [
+
         "ecg",
         "signal",
         "voltage",
@@ -830,6 +1341,7 @@ def read_csv_ecg(
 
 
         ignored = [
+
             "time",
             "timestamp",
             "seconds",
@@ -867,7 +1379,9 @@ def read_csv_ecg(
         if filtered:
 
             signal_column = (
-                filtered[-1]
+                filtered[
+                    -1
+                ]
             )
 
 
@@ -883,6 +1397,7 @@ def read_csv_ecg(
                 ]
             )
 
+
         else:
 
             raise ValueError(
@@ -891,13 +1406,19 @@ def read_csv_ecg(
 
 
     signal = (
+
         pd.to_numeric(
+
             df[
                 signal_column
             ],
-            errors="coerce",
+
+            errors=
+                "coerce",
         )
+
         .dropna()
+
         .to_numpy(
             dtype=np.float64
         )
@@ -936,7 +1457,7 @@ def read_csv_ecg(
 
 
     # -----------------------------------------------------
-    # DETECT FROM TIME COLUMN
+    # DETECT SAMPLE RATE FROM TIME COLUMN
     # -----------------------------------------------------
 
     time_column = None
@@ -954,9 +1475,11 @@ def read_csv_ecg(
 
 
         if (
-            "time" in name
+            "time"
+            in name
             or
-            "second" in name
+            "second"
+            in name
         ):
 
             time_column = (
@@ -969,13 +1492,19 @@ def read_csv_ecg(
     if time_column is not None:
 
         times = (
+
             pd.to_numeric(
+
                 df[
                     time_column
                 ],
-                errors="coerce",
+
+                errors=
+                    "coerce",
             )
+
             .dropna()
+
             .to_numpy(
                 dtype=np.float64
             )
@@ -993,7 +1522,9 @@ def read_csv_ecg(
 
             differences = (
                 differences[
-                    differences > 0
+                    differences
+                    >
+                    0
                 ]
             )
 
@@ -1020,6 +1551,7 @@ def read_csv_ecg(
 
 
     raise ValueError(
+
         "Could not determine CSV sampling rate. "
         "Enter the original sampling rate."
     )
@@ -1032,13 +1564,17 @@ def read_csv_ecg(
 def preprocess_ecg(
     signal,
     original_fs,
-    target_fs=150,
-    duration=60,
+    target_fs=TARGET_FS,
+    duration=TARGET_DURATION,
 ):
 
     signal = np.asarray(
+
         signal,
-        dtype=np.float64,
+
+        dtype=
+            np.float64,
+
     ).squeeze()
 
 
@@ -1077,7 +1613,7 @@ def preprocess_ecg(
 
 
     # -----------------------------------------------------
-    # SAME RESAMPLING USED DURING TRAINING
+    # RESAMPLE
     # -----------------------------------------------------
 
     if original_fs != target_fs:
@@ -1114,10 +1650,11 @@ def preprocess_ecg(
 
 
     # -----------------------------------------------------
-    # PAD / TRUNCATE TO 9000
+    # PAD / TRUNCATE
     # -----------------------------------------------------
 
     target_length = int(
+
         target_fs
         *
         duration
@@ -1125,15 +1662,20 @@ def preprocess_ecg(
 
 
     result = np.zeros(
+
         target_length,
-        dtype=np.float32,
+
+        dtype=
+            np.float32,
     )
 
 
     n = min(
+
         len(
             signal
         ),
+
         target_length,
     )
 
@@ -1169,7 +1711,9 @@ def extract_rf_features(
     for part in parts:
 
         features.extend(
+
             [
+
                 np.mean(
                     part
                 ),
@@ -1190,10 +1734,16 @@ def extract_rf_features(
 
 
     return (
+
         np.array(
+
             features,
-            dtype=np.float32,
+
+            dtype=
+                np.float32,
+
         )
+
         .reshape(
             1,
             -1,
@@ -1224,22 +1774,29 @@ def predict_random_forest(
     raw_probabilities = (
         rf_model.predict_proba(
             features
-        )[0]
+        )[
+            0
+        ]
     )
 
 
     elapsed_ms = (
+
         time.perf_counter()
         -
         start
+
     ) * 1000
 
 
     probabilities = np.zeros(
+
         len(
             CLASS_NAMES
         ),
-        dtype=np.float64,
+
+        dtype=
+            np.float64,
     )
 
 
@@ -1262,8 +1819,10 @@ def predict_random_forest(
 
             if (
                 0
-                <= class_id
-                < len(
+                <=
+                class_id
+                <
+                len(
                     CLASS_NAMES
                 )
             ):
@@ -1271,6 +1830,7 @@ def predict_random_forest(
                 probabilities[
                     class_id
                 ] = (
+
                     raw_probabilities[
                         model_index
                     ]
@@ -1287,6 +1847,7 @@ def predict_random_forest(
 
 
     prediction_index = int(
+
         np.argmax(
             probabilities
         )
@@ -1305,6 +1866,7 @@ def predict_random_forest(
 
         "confidence":
             float(
+
                 probabilities[
                     prediction_index
                 ]
@@ -1316,6 +1878,7 @@ def predict_random_forest(
                 index
             ]:
                 float(
+
                     probabilities[
                         index
                     ]
@@ -1346,18 +1909,23 @@ def predict_transformer(
 ):
 
     tensor = (
+
         torch.from_numpy(
             signal
         )
+
         .float()
+
         .unsqueeze(
             0
         )
+
         .unsqueeze(
             0
         )
+
         .to(
-            device
+            DEVICE
         )
     )
 
@@ -1377,28 +1945,40 @@ def predict_transformer(
 
 
         probabilities = (
+
             torch.softmax(
+
                 logits,
+
                 dim=1,
-            )[0]
+
+            )[
+                0
+            ]
         )
 
 
     elapsed_ms = (
+
         time.perf_counter()
         -
         start
+
     ) * 1000
 
 
     probabilities = (
+
         probabilities
+
         .cpu()
+
         .numpy()
     )
 
 
     prediction_index = int(
+
         np.argmax(
             probabilities
         )
@@ -1417,6 +1997,7 @@ def predict_transformer(
 
         "confidence":
             float(
+
                 probabilities[
                     prediction_index
                 ]
@@ -1428,6 +2009,7 @@ def predict_transformer(
                 index
             ]:
                 float(
+
                     probabilities[
                         index
                     ]
@@ -1458,18 +2040,23 @@ def predict_ctrhythm(
 ):
 
     tensor = (
+
         torch.from_numpy(
             signal
         )
+
         .float()
+
         .unsqueeze(
             0
         )
+
         .unsqueeze(
             0
         )
+
         .to(
-            device
+            DEVICE
         )
     )
 
@@ -1489,28 +2076,40 @@ def predict_ctrhythm(
 
 
         probabilities = (
+
             torch.softmax(
+
                 logits,
+
                 dim=1,
-            )[0]
+
+            )[
+                0
+            ]
         )
 
 
     elapsed_ms = (
+
         time.perf_counter()
         -
         start
+
     ) * 1000
 
 
     probabilities = (
+
         probabilities
+
         .cpu()
+
         .numpy()
     )
 
 
     prediction_index = int(
+
         np.argmax(
             probabilities
         )
@@ -1529,6 +2128,7 @@ def predict_ctrhythm(
 
         "confidence":
             float(
+
                 probabilities[
                     prediction_index
                 ]
@@ -1540,6 +2140,7 @@ def predict_ctrhythm(
                 index
             ]:
                 float(
+
                     probabilities[
                         index
                     ]
@@ -1624,37 +2225,23 @@ class HistoryAISummary(
 # =========================================================
 
 AI_INSTRUCTIONS = """
-You are generating an educational summary of one or more
+You are generating a concise educational summary of one or more
 single-lead ECG recordings analyzed by research models.
 
 Each ECG is analyzed by three models:
 
 1. Random Forest
-2. Simplified CNN + Transformer
+2. CNN + Transformer
 3. CTRhythm
 
-Random Forest is the simple baseline.
+The models classify:
 
-CNN + Transformer is a simplified deep-learning model
-created for this project.
+- Normal
+- AFib
+- Other
+- Noisy
 
-CTRhythm is the implementation of the architecture from
-the reference CTRhythm paper.
-
-The current CTRhythm checkpoint is from Fold 1.
-
-Fold 1 validation results:
-
-Accuracy: 0.8658
-Normal F1: 0.9173
-AFib F1: 0.8121
-Other F1: 0.7987
-Noisy F1: 0.5556
-Paper-style F1: 0.8427
-4-class Macro F1: 0.7709
-
-These are research validation results and are not
-clinical accuracy.
+The models are research models and are not clinically validated.
 
 Do not diagnose the person.
 
@@ -1668,33 +2255,30 @@ Use wording such as:
 
 Model confidence is not clinical certainty.
 
-These models are not clinically validated.
+CTRhythm Fold 1 project validation:
 
-Recordings are supplied in upload order.
+Accuracy: 0.8658
+Normal F1: 0.9173
+AFib F1: 0.8121
+Other F1: 0.7987
+Noisy F1: 0.5556
+Paper-style F1: 0.8427
+4-class Macro F1: 0.7709
+
+These are research validation results and are not clinical accuracy.
 
 Do not invent recording dates.
 
-Do not say a condition became medically worse only
-because confidence changed.
+Do not invent symptoms.
 
-If multiple recordings repeatedly receive AFib-like
-classifications, explain that repeated abnormal model
-results may be worth discussing with a healthcare
-professional.
+Only symptoms present in reported_symptoms were actually reported.
 
-If results differ between models, clearly explain the
-disagreement.
+If models disagree, clearly explain the disagreement.
 
-CTRhythm achieved the strongest paper-style Fold 1
-validation result in this project, but do not automatically
-assume it is clinically correct.
+Repeated abnormal classifications may be worth discussing with a
+healthcare professional, but do not call them a diagnosis.
 
-Never invent symptoms.
-
-Only symptoms present in reported_symptoms were actually
-reported.
-
-Possible rhythm-related conditions may include:
+Possible rhythm-related conditions to discuss can include:
 
 - atrial fibrillation
 - another atrial arrhythmia
@@ -1706,21 +2290,16 @@ Possible rhythm-related conditions may include:
 
 Do not generate unrelated disease lists.
 
-For repeated abnormal classifications, suggestions can
-include saving the ECG, showing it to a healthcare
-professional, discussing a clinical ECG, or discussing
-longer rhythm monitoring.
-
 If reported symptoms include severe chest pain, fainting,
-severe shortness of breath, facial drooping, difficulty
-speaking, or new one-sided weakness, urgent medical
-evaluation may be appropriate.
+severe shortness of breath, facial drooping, difficulty speaking,
+or new one-sided weakness, urgent medical evaluation may be
+appropriate.
 
 Keep the summary concise and easy to understand.
 
-The disclaimer must state that this is educational and
-research use only, is not a medical diagnosis, and the
-models are not clinically validated for general medical use.
+The disclaimer must state that this output is for educational and
+research use only, is not a medical diagnosis, and these models are
+not clinically validated for general medical use.
 """
 
 
@@ -1750,6 +2329,7 @@ def generate_history_summary(
         "model_validation_context": {
 
             "Random Forest": {
+
                 "accuracy":
                     0.5955,
 
@@ -1758,6 +2338,7 @@ def generate_history_summary(
             },
 
             "CNN + Transformer": {
+
                 "accuracy":
                     0.8535,
 
@@ -1769,6 +2350,7 @@ def generate_history_summary(
             },
 
             "CTRhythm": {
+
                 "fold":
                     1,
 
@@ -1797,15 +2379,20 @@ def generate_history_summary(
 
 
     response = (
+
         openai_client
+
         .responses
+
         .parse(
 
             model=
                 OPENAI_MODEL,
 
             input=[
+
                 {
+
                     "role":
                         "system",
 
@@ -1814,6 +2401,7 @@ def generate_history_summary(
                 },
 
                 {
+
                     "role":
                         "user",
 
@@ -1868,8 +2456,11 @@ def root():
             "3.0.0",
 
         "models": [
+
             "Random Forest",
+
             "CNN + Transformer",
+
             "CTRhythm",
         ],
 
@@ -1909,9 +2500,7 @@ def health():
             True,
 
         "ctrhythm_architecture":
-            str(
-                CTRHYTHM_SOURCE
-            ),
+            "embedded in api/main.py",
 
         "openai_configured":
             openai_client
@@ -1987,12 +2576,12 @@ async def predict(
                 raise ValueError()
 
 
-        except Exception:
+        except Exception as error:
 
             raise HTTPException(
                 status_code=400,
                 detail="sample_rates must be a JSON list.",
-            )
+            ) from error
 
 
     recordings = []
@@ -2025,10 +2614,13 @@ async def predict(
 
 
         extension = (
+
             Path(
                 filename
             )
+
             .suffix
+
             .lower()
         )
 
@@ -2049,6 +2641,7 @@ async def predict(
                 "error":
                     "Only .mat and .csv files are supported.",
             })
+
 
             continue
 
@@ -2085,7 +2678,8 @@ async def predict(
 
                 if (
                     index
-                    < len(
+                    <
+                    len(
                         parsed_sample_rates
                     )
                 ):
@@ -2164,10 +2758,13 @@ async def predict(
 
 
             duration_seconds = (
+
                 len(
                     raw_signal
                 )
+
                 /
+
                 original_fs
             )
 
@@ -2176,6 +2773,7 @@ async def predict(
 
                 "original_samples":
                     int(
+
                         len(
                             raw_signal
                         )
@@ -2183,22 +2781,27 @@ async def predict(
 
                 "original_sample_rate":
                     round(
+
                         float(
                             original_fs
                         ),
+
                         2,
                     ),
 
                 "duration_seconds":
                     round(
+
                         float(
                             duration_seconds
                         ),
+
                         2,
                     ),
 
                 "processed_samples":
                     int(
+
                         len(
                             processed_signal
                         )
