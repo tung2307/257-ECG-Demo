@@ -6,8 +6,8 @@ import { Geist } from "next/font/google";
 import { TRPCReactProvider } from "~/trpc/react";
 
 export const metadata: Metadata = {
-  title: "IRL — Dating Made Real",
-  description: "Meet real people. Make real connections.",
+  title: "ECG AF Detection — CMPE 257",
+  description: "Atrial fibrillation detection using AI-based ECG analysis.",
   icons: [{ rel: "icon", url: "/favicon.ico" }],
 };
 
