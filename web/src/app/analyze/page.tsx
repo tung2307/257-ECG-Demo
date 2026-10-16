@@ -2,9 +2,9 @@
 
 import type { DragEvent } from "react";
 
-import { useRef, useState } from "react";
-
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useRef, useState } from "react";
 
 import type { MultiECGResponse } from "~/types/ecg";
 
@@ -12,6 +12,20 @@ const MAX_FILES = 12;
 
 function getFileKey(file: File) {
   return [file.name, file.size, file.lastModified].join("-");
+}
+
+function getErrorMessage(data: unknown): string | undefined {
+  if (typeof data !== "object" || data === null) {
+    return undefined;
+  }
+
+  if (!("error" in data)) {
+    return undefined;
+  }
+
+  const error = data.error;
+
+  return typeof error === "string" ? error : undefined;
 }
 
 export default function AnalyzePage() {
@@ -146,23 +160,18 @@ export default function AnalyzePage() {
 
       const response = await fetch("/api/ecg/predict", {
         method: "POST",
-
         body: formData,
       });
 
-      const data = await response.json();
+      const data: unknown = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error ?? "ECG analysis failed.");
+        throw new Error(getErrorMessage(data) ?? "ECG analysis failed.");
       }
 
       const result = data as MultiECGResponse;
 
-      sessionStorage.setItem(
-        "ecgAnalysisResult",
-
-        JSON.stringify(result),
-      );
+      sessionStorage.setItem("ecgAnalysisResult", JSON.stringify(result));
 
       sessionStorage.setItem("ecgReportedSymptoms", symptoms);
 
@@ -183,16 +192,16 @@ export default function AnalyzePage() {
       {/* HEADER */}
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
-          <a href="/" className="font-bold text-slate-900">
+          <Link href="/" className="font-bold text-slate-900">
             ECG Analyzer
-          </a>
+          </Link>
 
-          <a
+          <Link
             href="/"
             className="text-sm font-medium text-slate-500 transition hover:text-slate-900"
           >
             Home
-          </a>
+          </Link>
         </div>
       </header>
 
@@ -222,13 +231,9 @@ export default function AnalyzePage() {
 
             setDragging(true);
           }}
-
           onDragLeave={() => setDragging(false)}
-
           onDrop={handleDrop}
-
           onClick={() => inputRef.current?.click()}
-
           className={`mt-10 cursor-pointer rounded-3xl border-2 border-dashed px-8 py-14 text-center transition ${
             dragging
               ? "border-slate-900 bg-slate-100"
@@ -237,15 +242,10 @@ export default function AnalyzePage() {
         >
           <input
             ref={inputRef}
-
             type="file"
-
             multiple
-
             accept=".mat,.csv,text/csv"
-
             className="hidden"
-
             onChange={(event) => {
               addFiles(Array.from(event.target.files ?? []));
 
@@ -289,10 +289,9 @@ export default function AnalyzePage() {
               </div>
 
               <button
+                type="button"
                 onClick={clearAll}
-
                 disabled={loading}
-
                 className="text-sm font-medium text-slate-500 hover:text-slate-900"
               >
                 Clear all
@@ -308,7 +307,6 @@ export default function AnalyzePage() {
                 return (
                   <div
                     key={key}
-
                     className="rounded-xl border border-slate-200 p-4"
                   >
                     <div className="flex items-start justify-between gap-4">
@@ -332,11 +330,8 @@ export default function AnalyzePage() {
 
                       <button
                         type="button"
-
                         disabled={loading}
-
                         onClick={() => removeFile(file)}
-
                         className="shrink-0 text-sm font-medium text-red-500 hover:text-red-700"
                       >
                         Remove
@@ -353,21 +348,15 @@ export default function AnalyzePage() {
                         <div className="mt-2 flex items-center gap-3">
                           <input
                             type="number"
-
                             min="1"
-
                             placeholder="Example: 200"
-
                             value={sampleRates[key] ?? ""}
-
                             onChange={(event) =>
                               setSampleRates((current) => ({
                                 ...current,
-
                                 [key]: event.target.value,
                               }))
                             }
-
                             className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-slate-500"
                           />
 
@@ -404,13 +393,9 @@ export default function AnalyzePage() {
 
             <textarea
               rows={4}
-
               value={symptoms}
-
               onChange={(event) => setSymptoms(event.target.value)}
-
               placeholder="Example: palpitations, dizziness, fatigue..."
-
               className="mt-4 w-full resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-slate-500"
             />
           </section>
@@ -426,14 +411,15 @@ export default function AnalyzePage() {
         {/* ANALYZE */}
         {files.length > 0 && (
           <button
+            type="button"
             onClick={analyzeECG}
-
             disabled={loading}
-
             className="mt-6 w-full rounded-xl bg-slate-900 px-6 py-4 font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {loading
-              ? `Analyzing ${files.length} recording${files.length > 1 ? "s" : ""}...`
+              ? `Analyzing ${files.length} recording${
+                  files.length > 1 ? "s" : ""
+                }...`
               : `Analyze ${files.length} ECG${files.length > 1 ? "s" : ""} →`}
           </button>
         )}

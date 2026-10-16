@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 export async function POST(request: Request) {
   try {
     const incoming = await request.formData();
@@ -47,28 +51,26 @@ export async function POST(request: Request) {
       cache: "no-store",
     });
 
-    const data = await response.json();
+    const data: unknown = await response.json();
 
     if (!response.ok) {
       let message = "ECG analysis failed.";
+      let detail: unknown;
 
-      if (typeof data.detail === "string") {
-        message = data.detail;
+      if (isRecord(data)) {
+        detail = data.detail;
       }
 
-      if (
-        data.detail &&
-        typeof data.detail === "object" &&
-        typeof data.detail.message === "string"
-      ) {
-        message = data.detail.message;
+      if (typeof detail === "string") {
+        message = detail;
+      } else if (isRecord(detail) && typeof detail.message === "string") {
+        message = detail.message;
       }
 
       return NextResponse.json(
         {
           error: message,
-
-          detail: data.detail,
+          detail,
         },
         {
           status: response.status,

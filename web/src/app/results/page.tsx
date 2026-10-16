@@ -10,6 +10,7 @@ import type {
   ModelResult,
   MultiECGResponse,
 } from "~/types/ecg";
+import Link from "next/link";
 
 type Tab = "overview" | "models" | "ai";
 
@@ -115,9 +116,9 @@ export default function ResultsPage() {
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
           <div>
-            <a href="/" className="font-bold text-slate-900">
+            <Link href="/" className="font-bold text-slate-900">
               ECG Analyzer
-            </a>
+            </Link>
 
             <p className="text-xs text-slate-400">CMPE 257 Research Project</p>
           </div>
