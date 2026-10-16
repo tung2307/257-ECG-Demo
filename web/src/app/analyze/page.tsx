@@ -158,7 +158,10 @@ export default function AnalyzePage() {
         formData.append("symptoms", symptoms.trim());
       }
 
-      const response = await fetch("/api/ecg/predict", {
+      const apiUrl =
+        process.env.NEXT_PUBLIC_ECG_API_URL ?? "http://127.0.0.1:8000";
+
+      const response = await fetch(`${apiUrl}/predict`, {
         method: "POST",
         body: formData,
       });
