@@ -1,10 +1,11 @@
 fastapi
 uvicorn[standard]
 python-multipart
-torch
+python-dotenv
+openai
+
 numpy
 pandas
 scipy
-scikit-learn
 joblib
-openai
+scikit-learn==1.7.2
