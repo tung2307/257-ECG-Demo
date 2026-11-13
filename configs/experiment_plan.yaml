@@ -1,0 +1,49 @@
+project:
+  name: ECG-Based Atrial Fibrillation Detection
+  course: CMPE 257
+
+dataset:
+  name: PhysioNet CinC2017
+  classes:
+    - Normal
+    - AFib
+    - Other
+    - Noisy
+
+preprocessing:
+  target_sampling_rate: 150
+  duration_seconds: 60
+  normalization: z_score
+  fixed_length: true
+
+models:
+  random_forest:
+    type: baseline
+    checkpoint: api/models/ecg_random_forest.pkl
+
+  cnn_transformer:
+    type: deep_learning
+    checkpoint: api/models/ecg_cnn_transformer_best.pth
+
+  ctrhythm:
+    type: paper_implementation
+    checkpoint: api/models/ctrhythm_fold1_best.pth
+    checkpoint_fold: 1
+
+evaluation:
+  metrics:
+    - accuracy
+    - macro_f1
+    - afib_recall
+    - afib_f1
+    - paper_style_f1
+
+  paper_style_classes:
+    - Normal
+    - AFib
+    - Other
+
+reproducibility:
+  original_training_seed: null
+  original_split_manifest: null
+  original_training_config: null

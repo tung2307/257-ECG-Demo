@@ -1,0 +1,32 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Raw and processed ECG data
+data/raw/
+data/processed/
+
+# Generated experiment artifacts
+results/runs/
+results/evaluation.json
+results/predictions.csv
+
+# Local editor files
+.DS_Store
+.vscode/
+.idea/
