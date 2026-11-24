@@ -36,7 +36,6 @@ ALIASES = {
     "noisy": "Noisy",
 }
 
-
 def normalize_label(value):
     key = str(value).strip().lower()
 
